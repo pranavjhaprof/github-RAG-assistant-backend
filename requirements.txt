@@ -3,7 +3,7 @@ uvicorn[standard]==0.29.0
 python-dotenv==1.0.1
 PyGithub==2.3.0
 
-# Langchain ecosystem — let pip resolve compatible versions
+# Langchain ecosystem - let pip resolve compatible versions
 langchain
 langchain-core
 langchain-openai
