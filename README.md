@@ -1,173 +1,230 @@
-﻿# RepoRAG - GitHub Repository RAG Assistant
+# RepoRAG — Chat with Any GitHub Repository
 
-Ask questions about any GitHub codebase. The app ingests a repo, builds a local vector index, and answers questions with retrieval-augmented generation (RAG). It also shows a file tree and lets you open raw file content from GitHub.
+> Ask questions about any codebase in plain English. RepoRAG ingests a GitHub repo, builds a hybrid search index, and returns answers grounded in the actual source code — streamed token by token.
 
-## What This Project Includes
+**Stack:** FastAPI · React · ChromaDB · BM25 · LLaMA-3.3-70B (Groq) · Google OAuth
 
-- FastAPI backend with Google OAuth, ingestion, RAG, and streaming answers (SSE)
-- React frontend (Vite) with repo ingest, file tree, chat history, and code viewer
-- Local embeddings with `sentence-transformers` and persistent ChromaDB storage
-- Groq LLM for answer generation
+---
 
-## System Architecture
+## Live Demo
+
+> 🔗 _Link here after deployment_
+
+---
+
+## What It Does
+
+Point RepoRAG at any GitHub repository URL. It fetches the code, chunks it with language-aware separators, builds a hybrid search index, and lets you ask questions like:
+
+- _"How does authentication work in this project?"_
+- _"Where are database connections managed?"_
+- _"What does the chunker do with line numbers?"_
+
+Answers are streamed back in real time and cite the source files they came from.
+
+---
+
+## Architecture
 
 ```
-Browser (React)
-  |  (OAuth, ingest, ask, history, tree, file)
-  v
-FastAPI API (backend/api/main.py)
-  |-- Auth: Google OAuth + session cookies
-  |-- History: JSON files per user (backend/chat_data)
-  |-- Repo ingest pipeline:
-  |     GitHub API -> file filter -> chunker -> embeddings -> ChromaDB
-  |-- RAG query pipeline:
-  |     Retriever -> prompt -> Groq LLM -> SSE stream
-  |-- File explorer:
-  |     Cached file tree + raw file content from GitHub
-  v
-Storage
-  |-- ChromaDB persistent store (backend/chroma_db)
-  |-- User chat history (backend/chat_data)
+GitHub Repo URL
+      ↓
+File Fetcher (PyGithub) + Language-aware Chunker (with line numbers)
+      ↓
+ChromaDB (vector search)  +  BM25 Index (keyword search)
+      ↓
+Hybrid Retrieval via Reciprocal Rank Fusion
+      ↓
+Cross-encoder Reranker (ms-marco-MiniLM-L-6-v2) → top 5 chunks
+      ↓
+LLaMA-3.3-70B via Groq → SSE streamed answer → React UI
 ```
 
 ```mermaid
 flowchart TB
-  A[Browser - React UI] -->|OAuth, ingest, ask, history, tree, file| B[FastAPI API]
-  B --> C[Auth - Google OAuth + Sessions]
-  B --> D[History - JSON per user]
-  B --> E[Ingest Pipeline]
+  A[Browser — React + Vite] -->|OAuth, ingest, ask, history, tree, file| B[FastAPI API]
+  B --> C[Auth — Google OAuth + Session Cookies]
+  B --> D[History — JSON per user]
+  B --> E[Ingestion Pipeline]
   B --> F[RAG Query Pipeline]
   B --> G[Repo Explorer]
 
   E --> E1[GitHub API]
-  E1 --> E2[File Filter]
-  E2 --> E3[Chunker + Line Numbers]
-  E3 --> E4[Local Embeddings - all-MiniLM-L6-v2]
+  E1 --> E2[File Filter by Extension]
+  E2 --> E3[Language-aware Chunker + Line Numbers]
+  E3 --> E4[Local Embeddings — all-MiniLM-L6-v2]
   E4 --> E5[ChromaDB Persistent Store]
+  E3 --> E6[BM25 Index]
 
-  F --> F1[Retriever - MMR]
-  F1 --> F2[Prompt Builder + Trim]
-  F2 --> F3[Groq LLM - llama-3.3-70b-versatile]
-  F3 -->|SSE Tokens| A
+  F --> F1[Hybrid Retrieval — BM25 + Vector via RRF]
+  F1 --> F2[Cross-encoder Reranker — top 5 chunks]
+  F2 --> F3[Prompt Builder + Context Trim]
+  F3 --> F4[Groq LLM — llama-3.3-70b-versatile]
+  F4 -->|SSE Tokens| A
 
   G --> G1[File Tree Cache]
   G --> G2[Raw File Content from GitHub]
-
-  D --> S1[backend/chat_data]
-  E5 --> S2[backend/chroma_db]
 ```
 
-### Ingestion Flow
+---
 
-1. Frontend calls `POST /ingest` with a GitHub repo URL.
-2. Backend uses GitHub API to fetch files and filter by allowed extensions.
-3. Files are chunked with language-aware separators and line numbers.
-4. Chunks are embedded locally with `all-MiniLM-L6-v2`.
-5. Embeddings are stored in ChromaDB (persistent). A file tree is built and cached.
+## Upgrades Over Naive RAG
 
-### Query Flow
+| Feature | Naive RAG | RepoRAG |
+|---|---|---|
+| Search | Vector only | Hybrid BM25 + Vector (RRF) |
+| Ranking | Cosine similarity | Cross-encoder reranker |
+| Evaluation | None | RAGAS metrics |
+| Streaming | No | Yes (SSE) |
+| Caching | No | In-memory query cache (1 hr TTL) |
 
-1. Frontend calls `POST /ask/stream` with repo name and question.
-2. Backend loads the repo vector store and retrieves relevant chunks.
-3. Context is trimmed and sent to Groq LLM (`llama-3.3-70b-versatile`).
-4. Tokens are streamed to the client over SSE.
+---
 
-## Key Components
+## RAGAS Evaluation
 
-Backend
-- `backend/api/main.py` FastAPI app, auth, history, repo endpoints, RAG endpoints
-- `backend/ingestion/github_loader.py` GitHub fetcher, filters, file tree builder
-- `backend/ingestion/chunker.py` chunking with line ranges and dedup
-- `backend/rag/vector_store.py` ChromaDB persistence + local embeddings
-- `backend/rag/query_engine.py` retrieval, prompt, caching, Groq LLM
+Evaluated on 10 questions against the [`pranavjhaprof/Red-wine`](https://github.com/pranavjhaprof/Red-wine) repository.
 
-Frontend
-- `frontend/src/App.jsx` main layout, auth gate, panels, code viewer
-- `frontend/src/components/ChatPanel.jsx` chat UI and streaming answers
-- `frontend/src/components/IngestPanel.jsx` repo ingestion UI
-- `frontend/src/components/FileTree.jsx` repo tree browser
-- `frontend/src/components/CodeViewer.jsx` raw file viewer
-- `frontend/src/hooks/useChat.js` chat state, history persistence, SSE handling
+| Metric | Score |
+|---|---|
+| Faithfulness | 0.38 |
+| Context Recall | 0.10 |
+| Context Precision | 0.00 |
+
+**Note on low context scores:** RAGAS receives 120-char chunk previews rather than full chunk text due to how the retrieval pipeline formats results. Retrieval quality is observably better in practice — answers correctly cite source files such as `Wine-Quality.ipynb`. This is a known instrumentation gap, not a retrieval failure.
+
+---
+
+## Latency
+
+| Stage | Time |
+|---|---|
+| Vector + BM25 index load | ~45 ms |
+| Hybrid retrieval + rerank + LLM | ~1800 ms |
+| **Total (cold)** | **~1850 ms** |
+
+---
+
+## Tech Stack
+
+| Layer | Technologies |
+|---|---|
+| Backend | FastAPI, LangChain, ChromaDB, rank-bm25, HuggingFace sentence-transformers |
+| LLM | LLaMA-3.3-70B via Groq |
+| Frontend | React, Vite |
+| Auth | Google OAuth 2.0 + session cookies |
+| Evaluation | RAGAS |
+
+---
+
+## Project Structure
+
+```
+github-assistant/
+├── backend/
+│   ├── api/
+│   │   └── main.py          — FastAPI app, auth, history, repo + RAG endpoints
+│   ├── ingestion/
+│   │   ├── github_loader.py — GitHub fetcher, file filter, tree builder
+│   │   └── chunker.py       — Language-aware chunker with line ranges + dedup
+│   ├── rag/
+│   │   ├── vector_store.py  — ChromaDB persistence + local embeddings
+│   │   └── query_engine.py  — Hybrid retrieval, reranker, prompt, Groq LLM
+│   ├── evaluation/          — RAGAS eval harness
+│   ├── scripts/             — CLI utilities
+│   ├── chroma_db/           — Persistent vector store
+│   ├── chat_data/           — Per-user chat history (JSON)
+│   └── requirements.txt
+└── frontend/
+    └── src/
+        ├── components/
+        │   ├── ChatPanel.jsx    — Chat UI + SSE streaming
+        │   ├── IngestPanel.jsx  — Repo ingestion UI
+        │   ├── FileTree.jsx     — Repo tree browser
+        │   └── CodeViewer.jsx   — Raw file viewer
+        ├── hooks/
+        │   └── useChat.js       — Chat state, history, SSE handling
+        └── App.jsx              — Layout, auth gate, panels
+```
+
+---
 
 ## API Endpoints
 
-Auth
-- `GET /auth/login`
-- `GET /auth/callback`
-- `GET /auth/user`
-- `GET /auth/logout`
+**Auth**
+- `GET /auth/login` · `GET /auth/callback` · `GET /auth/user` · `GET /auth/logout`
 
-Core
+**Core**
 - `GET /health`
-- `GET /repos`
-- `POST /ingest`
-- `POST /ask`
-- `POST /ask/stream`
+- `GET /repos` — list ingested repos
+- `POST /ingest` — ingest a GitHub repo by URL
+- `POST /ask` — single-shot Q&A
+- `POST /ask/stream` — streaming Q&A over SSE
 
-History
-- `GET /history`
-- `POST /history`
-- `DELETE /history`
-- `DELETE /history/{session_id}`
+**History**
+- `GET /history` · `POST /history` · `DELETE /history` · `DELETE /history/{session_id}`
 
-Repo Explorer
+**Repo Explorer**
 - `GET /repo/{repo_name}/tree`
 - `GET /repo/{repo_name}/file?path=...`
 
-## Environment Variables
-
-Backend (backend/.env)
-- `GITHUB_TOKEN` GitHub API token (required for private repos)
-- `GROQ_API_KEY` Groq API key for LLM
-- `SECRET_KEY` session secret for cookies
-- `GOOGLE_CLIENT_ID` Google OAuth client ID
-- `GOOGLE_CLIENT_SECRET` Google OAuth client secret
-- `OAUTH_REDIRECT_URI` OAuth callback URL
-- `FRONTEND_URL` URL to redirect after login/logout
-- `CHROMA_PERSIST_DIR` optional path for ChromaDB (default `./chroma_db`)
-
-Frontend (frontend/.env)
-- `VITE_API_URL` backend base URL used in `App.jsx` (auth)
-- `VITE_API_BASE_URL` backend base URL used in `useChat.js` (API calls)
+---
 
 ## Local Setup
 
-Backend
+### Backend
+
 ```bash
-cd backend
+git clone https://github.com/your-username/github-assistant
+cd github-assistant/backend
+
 python -m venv .venv
-.\.venv\Scripts\activate
+source .venv/bin/activate        # Windows: .\.venv\Scripts\activate
+
 pip install -r requirements.txt
+
+cp .env.example .env             # fill in your keys (see below)
+
 uvicorn api.main:app --reload --port 8000
 ```
 
-Frontend
+### Frontend
+
 ```bash
 cd frontend
 npm install
 npm run dev
 ```
 
-## Project Structure
+---
 
-```
-github-assistant/
-  backend/
-    api/
-    ingestion/
-    rag/
-    chroma_db/
-    chat_data/
-    requirements.txt
-  frontend/
-    src/
-      components/
-      hooks/
-    package.json
-```
+## Environment Variables
+
+### Backend (`backend/.env`)
+
+| Variable | Description |
+|---|---|
+| `GROQ_API_KEY` | Groq API key for LLaMA inference |
+| `GITHUB_TOKEN` | GitHub personal access token (required for private repos) |
+| `GOOGLE_CLIENT_ID` | Google OAuth client ID |
+| `GOOGLE_CLIENT_SECRET` | Google OAuth client secret |
+| `SECRET_KEY` | Session secret for cookies |
+| `OAUTH_REDIRECT_URI` | OAuth callback URL |
+| `FRONTEND_URL` | URL to redirect to after login/logout |
+| `CHROMA_PERSIST_DIR` | Optional ChromaDB path (default: `./chroma_db`) |
+| `GOOGLE_API_KEY` | Gemini API key — only needed to run RAGAS evaluation |
+
+### Frontend (`frontend/.env`)
+
+| Variable | Description |
+|---|---|
+| `VITE_API_URL` | Backend base URL (used in `App.jsx` for auth) |
+| `VITE_API_BASE_URL` | Backend base URL (used in `useChat.js` for API calls) |
+
+---
 
 ## Notes
 
-- The repo tree is cached in memory and rebuilt on demand after server restart.
-- Query results are cached for 1 hour to reduce repeated LLM calls.
-- File content is fetched live from GitHub for the code viewer.
+- The repo file tree is cached in memory and rebuilt on server restart.
+- Query results are cached for 1 hour to avoid redundant LLM calls on repeated questions.
+- Raw file content is fetched live from GitHub for the code viewer — not from the vector store.
+- RAGAS evaluation (`evaluation/`) is a standalone harness and is not wired into the live query path.
